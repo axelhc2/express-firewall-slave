@@ -44,13 +44,11 @@ const fs = __importStar(require("fs"));
 const axios_1 = __importDefault(require("axios"));
 const config = __importStar(require("./config"));
 const command = process.argv[2];
-// Fonction pour détecter le vrai OS avec version
 const detectOS = () => {
     const platform = os.platform();
     try {
         switch (platform) {
             case 'linux':
-                // Lire /etc/os-release pour obtenir la distribution et la version
                 if (fs.existsSync('/etc/os-release')) {
                     const osRelease = fs.readFileSync('/etc/os-release', 'utf-8');
                     const lines = osRelease.split('\n');
@@ -68,7 +66,6 @@ const detectOS = () => {
                             prettyName = line.split('=')[1].replace(/"/g, '').trim();
                         }
                     }
-                    // Utiliser PRETTY_NAME si disponible, sinon combiner NAME et VERSION
                     if (prettyName) {
                         return prettyName;
                     }
@@ -79,9 +76,7 @@ const detectOS = () => {
                         return name;
                     }
                 }
-                // Fallback: essayer d'autres méthodes
                 try {
-                    // Pour Debian/Ubuntu
                     if (fs.existsSync('/etc/debian_version')) {
                         const debianVersion = fs.readFileSync('/etc/debian_version', 'utf-8').trim();
                         return `Debian ${debianVersion}`;
@@ -91,7 +86,6 @@ const detectOS = () => {
                 return 'Linux';
             case 'win32':
                 try {
-                    // Utiliser wmic pour obtenir la version Windows
                     const winVersion = (0, child_process_1.execSync)('wmic os get Caption /value', { encoding: 'utf-8' });
                     const match = winVersion.match(/Caption=(.+)/);
                     if (match && match[1]) {
@@ -102,7 +96,6 @@ const detectOS = () => {
                 return 'Windows';
             case 'darwin':
                 try {
-                    // Utiliser sw_vers pour obtenir la version macOS
                     const macVersion = (0, child_process_1.execSync)('sw_vers -productName && sw_vers -productVersion', { encoding: 'utf-8' });
                     const lines = macVersion.trim().split('\n');
                     if (lines.length >= 2) {
@@ -123,11 +116,9 @@ const detectOS = () => {
         }
     }
     catch (error) {
-        // En cas d'erreur, retourner au moins la plateforme de base
         return platform.charAt(0).toUpperCase() + platform.slice(1);
     }
 };
-// Vérifier si le service systemd est installé
 const isSystemdServiceInstalled = () => {
     try {
         (0, child_process_1.execSync)('systemctl is-enabled backfirewall.service > /dev/null 2>&1', { stdio: 'ignore' });
@@ -137,7 +128,6 @@ const isSystemdServiceInstalled = () => {
         return false;
     }
 };
-// Exécuter une commande systemctl
 const systemctl = (action) => {
     try {
         const output = (0, child_process_1.execSync)(`systemctl ${action} backfirewall.service`, { encoding: 'utf-8' });
@@ -151,14 +141,12 @@ const systemctl = (action) => {
             console.error(error.stderr.toString().trim());
     }
 };
-// Obtenir le statut via systemctl
 const getSystemdStatus = () => {
     try {
         const status = (0, child_process_1.execSync)('systemctl is-active backfirewall.service', { encoding: 'utf-8' }).trim();
         const isEnabled = (0, child_process_1.execSync)('systemctl is-enabled backfirewall.service', { encoding: 'utf-8' }).trim();
         console.log(`État: ${status === 'active' ? 'ACTIF' : 'INACTIF'}`);
         console.log(`Démarrage automatique: ${isEnabled === 'enabled' ? 'OUI' : 'NON'}`);
-        // Afficher les informations détaillées
         systemctl('status --no-pager -l');
     }
     catch (error) {
@@ -262,7 +250,6 @@ async function handleReboot() {
     }
 }
 async function handleConnect() {
-    // Récupérer les arguments url et token
     const url = process.argv[3];
     const token = process.argv[4];
     if (!url || !token) {
@@ -270,13 +257,9 @@ async function handleConnect() {
         console.error('Exemple: firewall connect http://194.15.53.71:3001 uuid-du-token');
         process.exit(1);
     }
-    // Construire l'URL complète avec /api/connect
     const apiUrl = url.endsWith('/') ? `${url}api/connect` : `${url}/api/connect`;
-    // Récupérer l'hostname
     const hostname = os.hostname();
-    // Détecter le système d'exploitation avec version
     const system = detectOS();
-    // Préparer les données à envoyer
     const data = {
         hostname: hostname,
         system: system,
@@ -289,9 +272,8 @@ async function handleConnect() {
             headers: {
                 'Content-Type': 'application/json'
             },
-            timeout: 10000 // 10 secondes de timeout
+            timeout: 10000
         });
-        // Sauvegarder l'URL et le token dans la configuration
         await config.writeConfig({
             url: url,
             token: token
@@ -304,18 +286,15 @@ async function handleConnect() {
     }
     catch (error) {
         if (error.response) {
-            // Le serveur a répondu avec un code d'erreur
             console.error(`Erreur ${error.response.status}: ${error.response.statusText}`);
             if (error.response.data) {
                 console.error('Détails:', JSON.stringify(error.response.data, null, 2));
             }
         }
         else if (error.request) {
-            // La requête a été faite mais aucune réponse n'a été reçue
             console.error('Aucune réponse du serveur. Vérifiez l\'URL et que le serveur est accessible.');
         }
         else {
-            // Une erreur s'est produite lors de la configuration de la requête
             console.error('Erreur lors de la connexion:', error.message);
         }
         process.exit(1);
