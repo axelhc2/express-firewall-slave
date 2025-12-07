@@ -1,4 +1,37 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
@@ -11,7 +44,10 @@ const config_1 = require("./config");
 const axios_1 = __importDefault(require("axios"));
 const os_1 = require("os");
 const child_process_1 = require("child_process");
+const util_1 = require("util");
+const execAsync = (0, util_1.promisify)(child_process_1.exec);
 const fs_1 = require("fs");
+const path = __importStar(require("path"));
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 // Fonction pour vérifier si un port est disponible
@@ -135,6 +171,48 @@ const checkAuthorization = async (appUrl) => {
 // Middleware pour parser le JSON
 app.use(express_1.default.json());
 app.use(express_1.default.urlencoded({ extended: true }));
+// Middleware pour vérifier l'authentification par token
+const authenticateToken = async (req, res, next) => {
+    try {
+        const config = await (0, config_1.readConfig)();
+        if (!config.token) {
+            return res.status(401).json({
+                error: 'Token non configuré',
+                message: 'Le serveur n\'a pas de token configuré'
+            });
+        }
+        // Vérifier le token dans les headers
+        // Support pour Authorization: Bearer <token>
+        const authHeader = req.headers.authorization;
+        let token;
+        if (authHeader && authHeader.startsWith('Bearer ')) {
+            token = authHeader.substring(7);
+        }
+        else {
+            // Support pour X-Token header
+            token = req.headers['x-token'];
+        }
+        if (!token) {
+            return res.status(401).json({
+                error: 'Token manquant',
+                message: 'Veuillez fournir un token d\'authentification dans le header Authorization ou X-Token'
+            });
+        }
+        if (token !== config.token) {
+            return res.status(403).json({
+                error: 'Token invalide',
+                message: 'Le token fourni n\'est pas valide'
+            });
+        }
+        next();
+    }
+    catch (error) {
+        return res.status(500).json({
+            error: 'Erreur d\'authentification',
+            message: error instanceof Error ? error.message : String(error)
+        });
+    }
+};
 // Route de test
 app.get('/', (req, res) => {
     res.json({
@@ -392,6 +470,181 @@ app.get('/api/status', async (req, res) => {
     catch (error) {
         res.status(500).json({
             error: 'Erreur lors de la récupération du statut',
+            message: error instanceof Error ? error.message : String(error)
+        });
+    }
+});
+// Chemin du fichier bash des règles de firewall
+const RULES_FILE = path.join((0, os_1.homedir)(), '.firewall', 'rules.sh');
+// Créer le répertoire .firewall s'il n'existe pas
+const ensureFirewallDir = async () => {
+    const firewallDir = path.dirname(RULES_FILE);
+    try {
+        await fs_1.promises.mkdir(firewallDir, { recursive: true });
+    }
+    catch (error) {
+        // Le répertoire existe déjà, c'est OK
+    }
+};
+// Sauvegarder les règles dans le fichier bash
+const saveRulesToFile = async (commands) => {
+    await ensureFirewallDir();
+    // Créer le contenu du fichier bash
+    const bashContent = [
+        '#!/bin/bash',
+        '# Règles de firewall générées automatiquement',
+        `# Date: ${new Date().toISOString()}`,
+        '',
+        ...commands.map(cmd => cmd.trim())
+    ].join('\n');
+    // Écrire le fichier
+    await fs_1.promises.writeFile(RULES_FILE, bashContent, 'utf-8');
+    // Rendre le fichier exécutable
+    await execAsync(`chmod +x "${RULES_FILE}"`);
+    console.log(`Règles sauvegardées dans ${RULES_FILE}`);
+};
+// Supprimer toutes les règles iptables
+const flushIptablesRules = async () => {
+    const flushCommands = [
+        'iptables -F', // Flush toutes les règles
+        'iptables -X', // Supprimer toutes les chaînes personnalisées
+        'iptables -t nat -F', // Flush NAT
+        'iptables -t nat -X', // Supprimer les chaînes NAT personnalisées
+        'iptables -t mangle -F', // Flush MANGLE
+        'iptables -t mangle -X', // Supprimer les chaînes MANGLE personnalisées
+        'iptables -t raw -F', // Flush RAW
+        'iptables -t raw -X', // Supprimer les chaînes RAW personnalisées
+        'iptables -P INPUT ACCEPT', // Politique par défaut INPUT
+        'iptables -P FORWARD ACCEPT', // Politique par défaut FORWARD
+        'iptables -P OUTPUT ACCEPT' // Politique par défaut OUTPUT
+    ];
+    let allStdout = '';
+    let allStderr = '';
+    for (const cmd of flushCommands) {
+        try {
+            console.log(`Flush iptables: ${cmd}`);
+            const { stdout, stderr } = await execAsync(cmd, {
+                timeout: 30000, // 30 secondes
+                maxBuffer: 1024 * 1024 // 1 MB
+            });
+            allStdout += stdout || '';
+            allStderr += stderr || '';
+        }
+        catch (error) {
+            // Ignorer les erreurs si les chaînes n'existent pas
+            if (!error.message.includes('No chain/target/match')) {
+                allStderr += error.stderr || error.message || '';
+            }
+        }
+    }
+    return { stdout: allStdout, stderr: allStderr };
+};
+// Route pour appliquer les règles de firewall
+app.post('/api/firewall/rules/apply', authenticateToken, async (req, res) => {
+    try {
+        // Récupérer les commandes de la requête
+        const { commands } = req.body;
+        if (!commands) {
+            return res.status(400).json({
+                error: 'Commande manquante',
+                message: 'Veuillez fournir des commandes dans le body de la requête (field "commands")'
+            });
+        }
+        // Support pour une seule commande (string) ou plusieurs commandes (array)
+        const commandsList = Array.isArray(commands) ? commands : [commands];
+        // Vérifier que toutes les commandes sont des chaînes de caractères
+        const invalidCommands = commandsList.filter(cmd => typeof cmd !== 'string');
+        if (invalidCommands.length > 0) {
+            return res.status(400).json({
+                error: 'Format invalide',
+                message: 'Toutes les commandes doivent être des chaînes de caractères'
+            });
+        }
+        const results = [];
+        try {
+            // 1. Sauvegarder les règles dans le fichier bash
+            console.log('Sauvegarde des règles dans le fichier bash...');
+            await saveRulesToFile(commandsList);
+            results.push({
+                step: 'save_rules',
+                success: true,
+                message: `Règles sauvegardées dans ${RULES_FILE}`
+            });
+        }
+        catch (error) {
+            results.push({
+                step: 'save_rules',
+                success: false,
+                error: error.message
+            });
+            return res.status(500).json({
+                error: 'Erreur lors de la sauvegarde des règles',
+                message: error.message,
+                results: results
+            });
+        }
+        try {
+            // 2. Supprimer toutes les règles iptables
+            console.log('Suppression de toutes les règles iptables...');
+            const flushResult = await flushIptablesRules();
+            results.push({
+                step: 'flush_iptables',
+                success: true,
+                stdout: flushResult.stdout,
+                stderr: flushResult.stderr || null
+            });
+        }
+        catch (error) {
+            results.push({
+                step: 'flush_iptables',
+                success: false,
+                error: error.message
+            });
+            // Continuer même en cas d'erreur de flush
+        }
+        try {
+            // 3. Exécuter le fichier bash
+            console.log(`Exécution du fichier bash: ${RULES_FILE}`);
+            const { stdout, stderr } = await execAsync(`bash "${RULES_FILE}"`, {
+                timeout: 300000, // 5 minutes
+                maxBuffer: 10 * 1024 * 1024 // 10 MB de buffer
+            });
+            results.push({
+                step: 'execute_rules',
+                success: true,
+                stdout: stdout,
+                stderr: stderr || null,
+                exitCode: 0
+            });
+            console.log('Règles de firewall appliquées avec succès');
+        }
+        catch (error) {
+            const exitCode = error.code || (error.signal ? -1 : 1);
+            results.push({
+                step: 'execute_rules',
+                success: false,
+                stdout: error.stdout || null,
+                stderr: error.stderr || error.message || null,
+                exitCode: exitCode,
+                error: error.message
+            });
+            console.error('Erreur lors de l\'exécution des règles', error.message);
+        }
+        // Vérifier si toutes les étapes ont réussi
+        const allSuccess = results.every(r => r.success);
+        res.status(allSuccess ? 200 : 207).json({
+            success: allSuccess,
+            message: allSuccess
+                ? 'Les règles de firewall ont été appliquées avec succès'
+                : 'Certaines étapes ont échoué',
+            timestamp: new Date().toISOString(),
+            rulesFile: RULES_FILE,
+            results: results
+        });
+    }
+    catch (error) {
+        res.status(500).json({
+            error: 'Erreur lors de l\'application des règles',
             message: error instanceof Error ? error.message : String(error)
         });
     }
