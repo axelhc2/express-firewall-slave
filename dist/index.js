@@ -41,6 +41,7 @@ const dotenv_1 = __importDefault(require("dotenv"));
 const net_1 = require("net");
 const process_manager_1 = require("./process-manager");
 const config_1 = require("./config");
+const iptables_1 = require("./iptables");
 const axios_1 = __importDefault(require("axios"));
 const os_1 = require("os");
 const child_process_1 = require("child_process");
@@ -430,6 +431,95 @@ app.get('/api/status', async (req, res) => {
     catch (error) {
         res.status(500).json({
             error: 'Erreur lors de la récupération du statut',
+            message: error instanceof Error ? error.message : String(error)
+        });
+    }
+});
+app.get('/api/iptables/view', authenticateToken, async (req, res) => {
+    try {
+        const lines = req.query.lines ? parseInt(req.query.lines, 10) : undefined;
+        const ip = req.query.ip;
+        const port = req.query.port;
+        const action = req.query.action;
+        const top = req.query.top ? parseInt(req.query.top, 10) : undefined;
+        const actionFilter = action && ['DROP', 'REJECT', 'ACCEPT', 'LOG'].includes(action.toUpperCase())
+            ? action.toUpperCase()
+            : undefined;
+        if (ip) {
+            const logs = await (0, iptables_1.getLogsByIP)(ip, actionFilter);
+            return res.json({
+                success: true,
+                ip: ip,
+                action: actionFilter || 'ALL',
+                count: logs.length,
+                logs: logs
+            });
+        }
+        if (port) {
+            const logs = await (0, iptables_1.getLogsByPort)(port, actionFilter);
+            return res.json({
+                success: true,
+                port: port,
+                action: actionFilter || 'ALL',
+                count: logs.length,
+                logs: logs
+            });
+        }
+        if (action && !top) {
+            const logs = await (0, iptables_1.getLogsByAction)(action);
+            return res.json({
+                success: true,
+                action: action.toUpperCase(),
+                count: logs.length,
+                logs: logs
+            });
+        }
+        if (top) {
+            const topIPs = await (0, iptables_1.getTopBlockedIPs)(top, actionFilter);
+            return res.json({
+                success: true,
+                top: top,
+                action: actionFilter || 'ALL',
+                ips: topIPs
+            });
+        }
+        const stats = await (0, iptables_1.readIptablesLogs)(lines, actionFilter);
+        res.json({
+            success: true,
+            totalEntries: stats.totalEntries,
+            byAction: stats.byAction,
+            topIPs: Object.entries(stats.byIP)
+                .map(([ip, data]) => ({
+                ip,
+                count: data.count,
+                actions: data.actions,
+                ports: data.ports
+            }))
+                .sort((a, b) => b.count - a.count)
+                .slice(0, 20),
+            byPort: Object.entries(stats.byPort)
+                .map(([port, data]) => ({
+                port,
+                count: data.count,
+                topIPs: Object.entries(data.ips)
+                    .map(([ip, count]) => ({ ip, count }))
+                    .sort((a, b) => b.count - a.count)
+                    .slice(0, 10)
+            }))
+                .sort((a, b) => b.count - a.count)
+                .slice(0, 20),
+            recentEntries: stats.entries.slice(-100),
+            logFile: stats.logFile,
+            error: stats.error,
+            info: stats.totalEntries === 0 && !stats.error
+                ? 'Aucun log iptables trouvé. Assurez-vous d\'avoir des règles LOG dans iptables avant les règles DROP/REJECT.'
+                : undefined
+        });
+    }
+    catch (error) {
+        res.status(500).json({
+            success: false,
+            error: 'Erreur lors de la lecture des logs iptables',
             message: error instanceof Error ? error.message : String(error)
         });
     }
