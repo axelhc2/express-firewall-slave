@@ -47,6 +47,11 @@ const os_1 = require("os");
 const child_process_1 = require("child_process");
 const util_1 = require("util");
 const execAsync = (0, util_1.promisify)(child_process_1.exec);
+const FIREWALL_DEBUG = process.env.FIREWALL_DEBUG === '1' || process.env.FIREWALL_DEBUG === 'true';
+const logDebug = (...args) => {
+    if (FIREWALL_DEBUG)
+        console.log(...args);
+};
 const fs_1 = require("fs");
 const path = __importStar(require("path"));
 dotenv_1.default.config();
@@ -538,7 +543,7 @@ app.get('/api/iptables/view', authenticateToken, async (req, res) => {
         });
     }
 });
-const RULES_FILE = path.join((0, os_1.homedir)(), '.firewall', 'rules.sh');
+const RULES_FILE = path.join((0, os_1.homedir)(), '.firewall', 'rules.nft');
 const ensureFirewallDir = async () => {
     const firewallDir = path.dirname(RULES_FILE);
     try {
@@ -547,52 +552,120 @@ const ensureFirewallDir = async () => {
     catch (error) {
     }
 };
+const normalizeNftRuleLine = (line) => {
+    const trimmed = (line ?? '').trim();
+    if (!trimmed)
+        return null;
+    if (trimmed.startsWith('#'))
+        return trimmed;
+    // If we received a shell-ish line like: `... || nft add ...`, keep only the nft part.
+    // Example: `list table inet X >/dev/null 2>&1 || nft add table inet X`
+    if (trimmed.includes('||')) {
+        const parts = trimmed.split('||');
+        const rhs = parts[parts.length - 1]?.trim();
+        if (rhs)
+            return normalizeNftRuleLine(rhs);
+    }
+    // Accept either "nft add ..." or raw "add ..." syntax, but store raw syntax for `nft -f`.
+    if (trimmed.toLowerCase().startsWith('nft ')) {
+        return trimmed.slice(4).trim();
+    }
+    return trimmed;
+};
+const normalizeRuleExpr = (expr) => {
+    // Fix common "iptables-like" patterns people send:
+    // - `... tcp accept` / `... udp accept` are not valid in nft; protocol-only match should be `ip protocol tcp/udp`.
+    // Keep it minimal: only rewrite the exact invalid pattern.
+    return expr
+        .replace(/\s+tcp\s+accept\b/i, ' ip protocol tcp accept')
+        .replace(/\s+udp\s+accept\b/i, ' ip protocol udp accept');
+};
+const buildNftConfigFromCommands = (lines) => {
+    const ruleRe = /^add\s+rule\s+(inet|ip|ip6)\s+(\S+)\s+(input|output|forward)\s+(.+)$/i;
+    let family = 'inet';
+    let table = null;
+    const rulesByChain = { input: [], output: [], forward: [] };
+    for (const raw of lines) {
+        const line = raw.trim();
+        const m = line.match(ruleRe);
+        if (!m)
+            continue;
+        const fam = m[1].toLowerCase();
+        const tbl = m[2];
+        const chain = m[3].toLowerCase();
+        const expr = m[4];
+        if (!table) {
+            table = tbl;
+            family = fam;
+        }
+        if (tbl !== table)
+            continue; // ignore mixed tables
+        rulesByChain[chain].push(`    ${normalizeRuleExpr(expr)}`);
+    }
+    if (!table)
+        return null;
+    const chainBlock = (name) => {
+        const rules = rulesByChain[name];
+        return [
+            `  chain ${name} {`,
+            `    type filter hook ${name} priority 0;`,
+            `    policy accept;`,
+            ...(rules.length ? rules : ['    # (aucune règle)']),
+            `  }`
+        ].join('\n');
+    };
+    return [
+        `table ${family} ${table} {`,
+        chainBlock('input'),
+        chainBlock('output'),
+        chainBlock('forward'),
+        `}`
+    ].join('\n');
+};
 const saveRulesToFile = async (commands) => {
     await ensureFirewallDir();
-    const bashContent = [
-        '#!/bin/bash',
-        '# Règles de firewall générées automatiquement',
+    const nftLines = commands
+        .map(normalizeNftRuleLine)
+        .filter((l) => typeof l === 'string' && l.trim().length > 0);
+    // If commands look like "add rule inet <table> <chain> ...", generate a proper config file.
+    const maybeConfig = buildNftConfigFromCommands(nftLines);
+    const payloadLines = maybeConfig ? [maybeConfig] : nftLines;
+    const nftContent = [
+        '# Règles nftables générées automatiquement',
         `# Date: ${new Date().toISOString()}`,
         '',
-        ...commands.map(cmd => cmd.trim())
+        ...payloadLines
     ].join('\n');
-    await fs_1.promises.writeFile(RULES_FILE, bashContent, 'utf-8');
-    await execAsync(`chmod +x "${RULES_FILE}"`);
-    console.log(`Règles sauvegardées dans ${RULES_FILE}`);
+    await fs_1.promises.writeFile(RULES_FILE, nftContent, 'utf-8');
+    logDebug(`[firewall] règles sauvegardées dans ${RULES_FILE}`);
 };
-const flushIptablesRules = async () => {
-    const flushCommands = [
-        'iptables -F',
-        'iptables -X',
-        'iptables -t nat -F',
-        'iptables -t nat -X',
-        'iptables -t mangle -F',
-        'iptables -t mangle -X',
-        'iptables -t raw -F',
-        'iptables -t raw -X',
-        'iptables -P INPUT ACCEPT',
-        'iptables -P FORWARD ACCEPT',
-        'iptables -P OUTPUT ACCEPT'
-    ];
-    let allStdout = '';
-    let allStderr = '';
-    for (const cmd of flushCommands) {
-        try {
-            console.log(`Flush iptables: ${cmd}`);
-            const { stdout, stderr } = await execAsync(cmd, {
-                timeout: 30000,
-                maxBuffer: 1024 * 1024
-            });
-            allStdout += stdout || '';
-            allStderr += stderr || '';
-        }
-        catch (error) {
-            if (!error.message.includes('No chain/target/match')) {
-                allStderr += error.stderr || error.message || '';
-            }
-        }
-    }
-    return { stdout: allStdout, stderr: allStderr };
+const flushNftRuleset = async () => {
+    const cmd = 'nft flush ruleset';
+    logDebug(`[firewall] flush nftables: ${cmd}`);
+    const { stdout, stderr } = await execAsync(cmd, {
+        timeout: 30000,
+        maxBuffer: 1024 * 1024
+    });
+    return { stdout: stdout || '', stderr: stderr || '' };
+};
+const applyNftRulesFileAtomically = async (rulesFile) => {
+    // Validate first (dry-run parse)
+    const checkCmd = `nft -c -f "${rulesFile}"`;
+    const applyCmd = `nft -f "${rulesFile}"`;
+    logDebug(`[firewall] validation nftables: ${checkCmd}`);
+    const check = await execAsync(checkCmd, {
+        timeout: 300000,
+        maxBuffer: 10 * 1024 * 1024
+    });
+    logDebug(`[firewall] application nftables: ${applyCmd}`);
+    const apply = await execAsync(applyCmd, {
+        timeout: 300000,
+        maxBuffer: 10 * 1024 * 1024
+    });
+    return {
+        stdout: [check.stdout, apply.stdout].filter(Boolean).join('\n'),
+        stderr: [check.stderr, apply.stderr].filter(Boolean).join('\n')
+    };
 };
 const applySavedRules = async () => {
     try {
@@ -600,33 +673,32 @@ const applySavedRules = async () => {
             await fs_1.promises.access(RULES_FILE);
         }
         catch {
-            console.log('Aucun fichier de règles trouvé, démarrage sans règles iptables');
+            logDebug('[firewall] aucun fichier de règles trouvé, démarrage sans règles nftables');
             return;
         }
-        console.log('Application automatique des règles iptables au démarrage...');
-        console.log(`Fichier: ${RULES_FILE}`);
-        console.log('Suppression des règles iptables existantes...');
-        await flushIptablesRules();
-        console.log(`Exécution des règles sauvegardées...`);
-        const { stdout, stderr } = await execAsync(`bash "${RULES_FILE}"`, {
-            timeout: 300000,
-            maxBuffer: 10 * 1024 * 1024
-        });
-        if (stdout) {
-            console.log('Sortie des règles:', stdout);
+        logDebug('[firewall] application automatique des règles nftables au démarrage');
+        logDebug(`[firewall] fichier: ${RULES_FILE}`);
+        logDebug('[firewall] suppression des règles nftables existantes');
+        await flushNftRuleset();
+        logDebug('[firewall] validation + application atomique des règles sauvegardées');
+        const { stdout, stderr } = await applyNftRulesFileAtomically(RULES_FILE);
+        // Par défaut: silencieux. En DEBUG: on expose stdout/stderr.
+        if (FIREWALL_DEBUG) {
+            if (stdout)
+                logDebug('[firewall] stdout:', stdout);
+            if (stderr)
+                logDebug('[firewall] stderr:', stderr);
+            logDebug('[firewall] ✓ règles nftables appliquées au démarrage');
         }
-        if (stderr) {
-            console.warn('Avertissements lors de l\'application des règles:', stderr);
-        }
-        console.log('✓ Règles iptables appliquées avec succès au démarrage');
     }
     catch (error) {
-        console.error('ERREUR: Impossible d\'appliquer les règles iptables au démarrage:', error.message);
-        if (error.stdout) {
-            console.error('Sortie:', error.stdout);
-        }
-        if (error.stderr) {
-            console.error('Erreur:', error.stderr);
+        // On garde un seul log d'erreur (important), détails uniquement en DEBUG.
+        console.error('[firewall] ERREUR: impossible d\'appliquer les règles nftables au démarrage:', error.message);
+        if (FIREWALL_DEBUG) {
+            if (error.stdout)
+                console.error('[firewall] stdout:', error.stdout);
+            if (error.stderr)
+                console.error('[firewall] stderr:', error.stderr);
         }
     }
 };
@@ -649,7 +721,7 @@ app.post('/api/firewall/rules/apply', authenticateToken, async (req, res) => {
         }
         const results = [];
         try {
-            console.log('Sauvegarde des règles dans le fichier bash...');
+            logDebug('[firewall] sauvegarde des règles dans le fichier nft');
             await saveRulesToFile(commandsList);
             results.push({
                 step: 'save_rules',
@@ -670,10 +742,10 @@ app.post('/api/firewall/rules/apply', authenticateToken, async (req, res) => {
             });
         }
         try {
-            console.log('Suppression de toutes les règles iptables...');
-            const flushResult = await flushIptablesRules();
+            logDebug('[firewall] suppression de toutes les règles nftables');
+            const flushResult = await flushNftRuleset();
             results.push({
-                step: 'flush_iptables',
+                step: 'flush_nftables',
                 success: true,
                 stdout: flushResult.stdout,
                 stderr: flushResult.stderr || null
@@ -681,17 +753,14 @@ app.post('/api/firewall/rules/apply', authenticateToken, async (req, res) => {
         }
         catch (error) {
             results.push({
-                step: 'flush_iptables',
+                step: 'flush_nftables',
                 success: false,
                 error: error.message
             });
         }
         try {
-            console.log(`Exécution du fichier bash: ${RULES_FILE}`);
-            const { stdout, stderr } = await execAsync(`bash "${RULES_FILE}"`, {
-                timeout: 300000,
-                maxBuffer: 10 * 1024 * 1024
-            });
+            logDebug(`[firewall] validation + application atomique via nft: ${RULES_FILE}`);
+            const { stdout, stderr } = await applyNftRulesFileAtomically(RULES_FILE);
             results.push({
                 step: 'execute_rules',
                 success: true,
@@ -699,7 +768,8 @@ app.post('/api/firewall/rules/apply', authenticateToken, async (req, res) => {
                 stderr: stderr || null,
                 exitCode: 0
             });
-            console.log('Règles de firewall appliquées avec succès');
+            // Par défaut: pas de log. En DEBUG seulement.
+            logDebug('[firewall] règles appliquées avec succès');
         }
         catch (error) {
             const exitCode = error.code || (error.signal ? -1 : 1);
@@ -711,7 +781,13 @@ app.post('/api/firewall/rules/apply', authenticateToken, async (req, res) => {
                 exitCode: exitCode,
                 error: error.message
             });
-            console.error('Erreur lors de l\'exécution des règles', error.message);
+            console.error('[firewall] erreur lors de l\'application des règles:', error.message);
+            if (FIREWALL_DEBUG) {
+                if (error.stdout)
+                    console.error('[firewall] stdout:', error.stdout);
+                if (error.stderr)
+                    console.error('[firewall] stderr:', error.stderr);
+            }
         }
         const allSuccess = results.every(r => r.success);
         res.status(allSuccess ? 200 : 207).json({

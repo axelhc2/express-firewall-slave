@@ -1,0 +1,50 @@
+# Dépendances système Linux pour Backfirewall
+
+## Minimum requis
+
+### 1. Node.js
+- Version : >= 18.0.0 (recommandé : 20.x)
+- Installation : https://nodejs.org/
+
+### 2. npm
+- Inclus avec Node.js
+- Version : >= 9.0.0
+
+### 3. systemd
+- Nécessaire pour le service de démarrage automatique
+- Généralement pré-installé sur les distributions modernes
+
+### 4. Commandes système
+- `df` : Pour l'utilisation du disque (coreutils)
+- `systemctl` : Pour la gestion du service (inclus avec systemd)
+
+## Installation rapide (Debian/Ubuntu)
+
+```bash
+# Installer Node.js 20.x
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt-get install -y nodejs
+
+# Vérifier
+node --version
+npm --version
+```
+
+## Installation rapide (CentOS/RHEL)
+
+```bash
+# Installer Node.js 20.x
+curl -fsSL https://rpm.nodesource.com/setup_20.x | sudo bash -
+sudo yum install -y nodejs
+
+# Vérifier
+node --version
+npm --version
+```
+
+## Fichiers système requis (généralement présents)
+
+- /proc/stat
+- /proc/net/dev
+- /etc/os-release
+
