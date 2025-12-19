@@ -649,7 +649,6 @@ const flushNftRuleset = async () => {
     return { stdout: stdout || '', stderr: stderr || '' };
 };
 const applyNftRulesFileAtomically = async (rulesFile) => {
-    // Validate first (dry-run parse)
     const checkCmd = `nft -c -f "${rulesFile}"`;
     const applyCmd = `nft -f "${rulesFile}"`;
     logDebug(`[firewall] validation nftables: ${checkCmd}`);
