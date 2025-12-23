@@ -569,186 +569,142 @@ app.get('/api/iptables/view', authenticateToken, async (req: Request, res: Respo
   }
 });
 
-const RULES_FILE = path.join(homedir(), '.firewall', 'rules.nft');
-
-const ensureFirewallDir = async (): Promise<void> => {
-  const firewallDir = path.dirname(RULES_FILE);
-  try {
-    await fs.mkdir(firewallDir, { recursive: true });
-  } catch (error) {
-  }
-};
-
-const normalizeNftRuleLine = (line: string): string | null => {
-  const trimmed = (line ?? '').trim();
-  if (!trimmed) return null;
-  if (trimmed.startsWith('#')) return trimmed;
-  // If we received a shell-ish line like: `... || nft add ...`, keep only the nft part.
-  // Example: `list table inet X >/dev/null 2>&1 || nft add table inet X`
-  if (trimmed.includes('||')) {
-    const parts = trimmed.split('||');
-    const rhs = parts[parts.length - 1]?.trim();
-    if (rhs) return normalizeNftRuleLine(rhs);
-  }
-  // Accept either "nft add ..." or raw "add ..." syntax, but store raw syntax for `nft -f`.
-  if (trimmed.toLowerCase().startsWith('nft ')) {
-    return trimmed.slice(4).trim();
-  }
-  return trimmed;
-};
-
-const normalizeRuleExpr = (expr: string): string => {
-  // Fix common "iptables-like" patterns people send:
-  // - `... tcp accept` / `... udp accept` are not valid in nft; protocol-only match should be `ip protocol tcp/udp`.
-  // Keep it minimal: only rewrite the exact invalid pattern.
-  return expr
-    .replace(/\s+tcp\s+accept\b/i, ' ip protocol tcp accept')
-    .replace(/\s+udp\s+accept\b/i, ' ip protocol udp accept');
-};
-
-const buildNftConfigFromCommands = (lines: string[]): string | null => {
-  // If user sends "add rule inet <table> <chain> ..." lines, build a proper nftables config file:
-  // table inet <table> { chain input { type filter hook input priority 0; policy accept; ... } ... }
-  type ChainName = 'input' | 'output' | 'forward';
-
-  const ruleRe = /^add\s+rule\s+(inet|ip|ip6)\s+(\S+)\s+(input|output|forward)\s+(.+)$/i;
-
-  let family: 'inet' | 'ip' | 'ip6' = 'inet';
-  let table: string | null = null;
-  const rulesByChain: Record<ChainName, string[]> = { input: [], output: [], forward: [] };
-
-  for (const raw of lines) {
-    const line = raw.trim();
-    const m = line.match(ruleRe);
-    if (!m) continue;
-
-    const fam = (m[1].toLowerCase() as 'inet' | 'ip' | 'ip6');
-    const tbl = m[2];
-    const chain = (m[3].toLowerCase() as ChainName);
-    const expr = m[4];
-
-    if (!table) {
-      table = tbl;
-      family = fam;
-    }
-    if (tbl !== table) continue; // ignore mixed tables
-
-    rulesByChain[chain].push(`    ${normalizeRuleExpr(expr)}`);
-  }
-
-  if (!table) return null;
-
-  const chainBlock = (name: ChainName) => {
-    const rules = rulesByChain[name];
-    return [
-      `  chain ${name} {`,
-      `    type filter hook ${name} priority 0;`,
-      `    policy accept;`,
-      ...(rules.length ? rules : ['    # (aucune règle)']),
-      `  }`
-    ].join('\n');
-  };
-
-  return [
-    `table ${family} ${table} {`,
-    chainBlock('input'),
-    chainBlock('output'),
-    chainBlock('forward'),
-    `}`
-  ].join('\n');
-};
-
-const saveRulesToFile = async (commands: string[]): Promise<void> => {
-  await ensureFirewallDir();
-  
-  const nftLines = commands
-    .map(normalizeNftRuleLine)
-    .filter((l): l is string => typeof l === 'string' && l.trim().length > 0);
-
-  // If commands look like "add rule inet <table> <chain> ...", generate a proper config file.
-  const maybeConfig = buildNftConfigFromCommands(nftLines);
-  const payloadLines = maybeConfig ? [maybeConfig] : nftLines;
-
-  const nftContent = [
-    '# Règles nftables générées automatiquement',
-    `# Date: ${new Date().toISOString()}`,
-    '',
-    ...payloadLines
-  ].join('\n');
-  
-  await fs.writeFile(RULES_FILE, nftContent, 'utf-8');
-  logDebug(`[firewall] règles sauvegardées dans ${RULES_FILE}`);
-};
-
-const flushNftRuleset = async (): Promise<{ stdout: string; stderr: string }> => {
-  const cmd = 'nft flush ruleset';
-  logDebug(`[firewall] flush nftables: ${cmd}`);
-  const { stdout, stderr } = await execAsync(cmd, {
-    timeout: 30000,
-    maxBuffer: 1024 * 1024
-  });
-  return { stdout: stdout || '', stderr: stderr || '' };
-};
-
-const applyNftRulesFileAtomically = async (rulesFile: string): Promise<{ stdout: string; stderr: string }> => {
-  const checkCmd = `nft -c -f "${rulesFile}"`;
-  const applyCmd = `nft -f "${rulesFile}"`;
-
-  logDebug(`[firewall] validation nftables: ${checkCmd}`);
-  const check = await execAsync(checkCmd, {
-    timeout: 300000,
-    maxBuffer: 10 * 1024 * 1024
-  });
-
-  logDebug(`[firewall] application nftables: ${applyCmd}`);
-  const apply = await execAsync(applyCmd, {
-    timeout: 300000,
-    maxBuffer: 10 * 1024 * 1024
-  });
-
-  return {
-    stdout: [check.stdout, apply.stdout].filter(Boolean).join('\n'),
-    stderr: [check.stderr, apply.stderr].filter(Boolean).join('\n')
-  };
-};
-
+// Fonction pour appliquer les règles sauvegardées au démarrage (si nécessaire)
+// Note: Avec iptables, les règles sont appliquées directement par le cluster
+// Cette fonction est conservée pour compatibilité mais ne fait rien par défaut
 const applySavedRules = async (): Promise<void> => {
+  // Avec iptables, les règles sont gérées directement par le cluster via l'API
+  // Pas besoin de charger un fichier au démarrage comme avec nftables
+  logDebug('[firewall] démarrage sans règles pré-chargées (iptables géré par le cluster)');
+};
+
+// Fonction pour valider qu'une commande est sécurisée (sécurité stricte)
+const validateIptablesCommand = (command: string): boolean => {
+  const trimmed = command.trim();
+  if (!trimmed) return false;
+  
+  // Liste des caractères dangereux à bloquer
+  // Note: '>' et '<' sont gérés séparément pour autoriser uniquement "2>/dev/null"
+  const dangerousChars = [';', '&&', '`', '$', '(', ')', '\\'];
+  
+  // Vérifier la présence de caractères dangereux
+  for (const char of dangerousChars) {
+    if (trimmed.includes(char)) {
+      return false;
+    }
+  }
+  
+  // Gérer les redirections: autoriser uniquement "2>/dev/null" à la fin
+  // Bloquer toutes les autres redirections (<, >, >>, etc.)
+  if (trimmed.includes('<') || trimmed.includes('>')) {
+    // Autoriser uniquement "2>/dev/null" à la fin de la commande
+    const allowedRedirect = /2>\s*\/dev\/null\s*$/;
+    if (!allowedRedirect.test(trimmed)) {
+      return false;
+    }
+  }
+  
+  // Liste des mots-clés dangereux à bloquer
+  const dangerousKeywords = [
+    'rm', 'cat', 'echo', 'wget', 'curl', 'nc', 'netcat', 'bash', 'sh', 'python', 
+    'perl', 'ruby', 'node', 'exec', 'eval', 'system', 'popen', 'subprocess',
+    'dd', 'mkfs', 'fdisk', 'mount', 'umount', 'chmod', 'chown', 'sudo', 'su',
+    'passwd', 'useradd', 'userdel', 'usermod', 'groupadd', 'groupdel',
+    'tar', 'zip', 'unzip', 'gzip', 'gunzip', 'bzip2', 'xz',
+    'ssh', 'scp', 'rsync', 'ftp', 'telnet', 'nc', 'netcat',
+    'vi', 'vim', 'nano', 'emacs', 'sed', 'awk', 'grep', 'find',
+    'kill', 'killall', 'pkill', 'xkill', 'reboot', 'shutdown', 'halt',
+    'iptables-save', 'iptables-restore' // Ces commandes sont aussi dangereuses
+  ];
+  
+  // Vérifier la présence de mots-clés dangereux (insensible à la casse)
+  const lowerCommand = trimmed.toLowerCase();
+  for (const keyword of dangerousKeywords) {
+    // Vérifier que le mot-clé n'est pas présent (même dans des sous-chaînes)
+    // On utilise des regex pour éviter les faux positifs
+    const regex = new RegExp(`\\b${keyword}\\b`, 'i');
+    if (regex.test(lowerCommand)) {
+      return false;
+    }
+  }
+  
+  // Extraire la commande principale
+  // Autoriser uniquement "iptables ... || true" ou "iptables ... 2>/dev/null"
+  // ou "iptables ... 2>/dev/null || true"
+  let mainCommand = trimmed;
+  
+  // Gérer "2>/dev/null" d'abord (peut être avant ou après || true)
+  if (trimmed.includes('2>/dev/null')) {
+    mainCommand = trimmed.replace(/\s*2>\/dev\/null\s*/g, ' ').trim();
+  }
+  
+  // Gérer "|| true" ensuite
+  if (mainCommand.includes('||')) {
+    const parts = mainCommand.split('||');
+    // Seulement autoriser "|| true" à la fin
+    if (parts.length === 2 && parts[1]?.trim() === 'true') {
+      mainCommand = parts[0].trim();
+    } else {
+      // Toute autre utilisation de || est interdite
+      return false;
+    }
+  }
+  
+  // Vérifier que la commande principale commence par "iptables"
+  const normalized = mainCommand.toLowerCase();
+  if (!normalized.startsWith('iptables ') && !normalized.startsWith('iptables\t')) {
+    return false;
+  }
+  
+  // Vérifier qu'il n'y a pas de pipes (|) sauf dans "|| true" déjà géré
+  if (trimmed.includes('|') && !trimmed.includes('|| true')) {
+    return false;
+  }
+  
+  return true;
+};
+
+// Fonction pour exécuter une commande iptables avec timeout
+const executeIptablesCommand = async (command: string): Promise<{ success: boolean; stdout?: string; stderr?: string; error?: string }> => {
   try {
-    try {
-      await fs.access(RULES_FILE);
-    } catch {
-      logDebug('[firewall] aucun fichier de règles trouvé, démarrage sans règles nftables');
-      return;
-    }
+    logDebug(`[firewall] exécution: ${command}`);
     
-    logDebug('[firewall] application automatique des règles nftables au démarrage');
-    logDebug(`[firewall] fichier: ${RULES_FILE}`);
+    const { stdout, stderr } = await execAsync(command, {
+      timeout: 10000, // 10 secondes de timeout
+      maxBuffer: 1024 * 1024 // 1MB max
+    });
     
-    logDebug('[firewall] suppression des règles nftables existantes');
-    await flushNftRuleset();
-    
-    logDebug('[firewall] validation + application atomique des règles sauvegardées');
-    const { stdout, stderr } = await applyNftRulesFileAtomically(RULES_FILE);
-    
-    // Par défaut: silencieux. En DEBUG: on expose stdout/stderr.
-    if (FIREWALL_DEBUG) {
-      if (stdout) logDebug('[firewall] stdout:', stdout);
-      if (stderr) logDebug('[firewall] stderr:', stderr);
-      logDebug('[firewall] ✓ règles nftables appliquées au démarrage');
-    }
+    return {
+      success: true,
+      stdout: stdout || undefined,
+      stderr: stderr || undefined
+    };
   } catch (error: any) {
-    // On garde un seul log d'erreur (important), détails uniquement en DEBUG.
-    console.error('[firewall] ERREUR: impossible d\'appliquer les règles nftables au démarrage:', error.message);
-    if (FIREWALL_DEBUG) {
-      if (error.stdout) console.error('[firewall] stdout:', error.stdout);
-      if (error.stderr) console.error('[firewall] stderr:', error.stderr);
+    // Les commandes avec || true ou 2>/dev/null peuvent échouer sans bloquer
+    // C'est normal, on considère ça comme un succès si le code de sortie est acceptable
+    const hasErrorHandling = command.includes('|| true') || command.includes('2>/dev/null');
+    
+    if (hasErrorHandling && error.code === 1) {
+      // Commande avec gestion d'erreur qui a échoué mais c'est attendu
+      return {
+        success: true,
+        stdout: error.stdout || undefined,
+        stderr: error.stderr || undefined
+      };
     }
+    
+    return {
+      success: false,
+      stdout: error.stdout || undefined,
+      stderr: error.stderr || undefined,
+      error: error.message
+    };
   }
 };
 
 app.post('/api/firewall/rules/apply', authenticateToken, async (req: Request, res: Response) => {
   try {
-    const { commands } = req.body;
+    const { commands, flush } = req.body;
     
     if (!commands) {
       return res.status(400).json({
@@ -759,6 +715,7 @@ app.post('/api/firewall/rules/apply', authenticateToken, async (req: Request, re
     
     const commandsList = Array.isArray(commands) ? commands : [commands];
     
+    // Validation: toutes les commandes doivent être des strings
     const invalidCommands = commandsList.filter(cmd => typeof cmd !== 'string');
     if (invalidCommands.length > 0) {
       return res.status(400).json({
@@ -767,89 +724,60 @@ app.post('/api/firewall/rules/apply', authenticateToken, async (req: Request, re
       });
     }
     
-    const results: any[] = [];
-    
-    try {
-      logDebug('[firewall] sauvegarde des règles dans le fichier nft');
-      await saveRulesToFile(commandsList);
-      results.push({
-        step: 'save_rules',
-        success: true,
-        message: `Règles sauvegardées dans ${RULES_FILE}`
-      });
-    } catch (error: any) {
-      results.push({
-        step: 'save_rules',
-        success: false,
-        error: error.message
-      });
-      return res.status(500).json({
-        error: 'Erreur lors de la sauvegarde des règles',
-        message: error.message,
-        results: results
+    // Validation de sécurité: vérifier que chaque commande est sécurisée
+    const invalidSecurityCommands = commandsList.filter(cmd => !validateIptablesCommand(cmd));
+    if (invalidSecurityCommands.length > 0) {
+      return res.status(400).json({
+        error: 'Sécurité: commande invalide ou dangereuse',
+        message: 'Les commandes doivent commencer par "iptables" et ne peuvent pas contenir de caractères ou mots-clés dangereux (;, &&, rm, etc.)',
+        invalidCommands: invalidSecurityCommands,
+        details: 'Commandes bloquées pour des raisons de sécurité. Seules les commandes iptables valides sont autorisées.'
       });
     }
     
-    try {
-      logDebug('[firewall] suppression de toutes les règles nftables');
-      const flushResult = await flushNftRuleset();
-      results.push({
-        step: 'flush_nftables',
-        success: true,
-        stdout: flushResult.stdout,
-        stderr: flushResult.stderr || null
-      });
-    } catch (error: any) {
-      results.push({
-        step: 'flush_nftables',
-        success: false,
-        error: error.message
-      });
-    }
+    const results: Array<{ command: string; success: boolean; error?: string }> = [];
+    let executed = 0;
     
-    try {
-      logDebug(`[firewall] validation + application atomique via nft: ${RULES_FILE}`);
-      const { stdout, stderr } = await applyNftRulesFileAtomically(RULES_FILE);
+    // Si flush est true, on flush d'abord les règles iptables
+    if (flush === true) {
+      logDebug('[firewall] flush des règles iptables demandé');
+      const flushCommands = [
+        'iptables -F',
+        'iptables -X'
+      ];
       
-      results.push({
-        step: 'execute_rules',
-        success: true,
-        stdout: stdout,
-        stderr: stderr || null,
-        exitCode: 0
-      });
-      
-      // Par défaut: pas de log. En DEBUG seulement.
-      logDebug('[firewall] règles appliquées avec succès');
-    } catch (error: any) {
-      const exitCode = error.code || (error.signal ? -1 : 1);
-      
-      results.push({
-        step: 'execute_rules',
-        success: false,
-        stdout: error.stdout || null,
-        stderr: error.stderr || error.message || null,
-        exitCode: exitCode,
-        error: error.message
-      });
-      
-      console.error('[firewall] erreur lors de l\'application des règles:', error.message);
-      if (FIREWALL_DEBUG) {
-        if (error.stdout) console.error('[firewall] stdout:', error.stdout);
-        if (error.stderr) console.error('[firewall] stderr:', error.stderr);
+      for (const flushCmd of flushCommands) {
+        const result = await executeIptablesCommand(flushCmd);
+        results.push({
+          command: flushCmd,
+          success: result.success,
+          error: result.error
+        });
+        if (result.success) executed++;
+        logDebug(`[firewall] ${result.success ? '✓' : '✗'} ${flushCmd}`);
       }
     }
     
+    // Exécuter les commandes une par une dans l'ordre
+    for (const command of commandsList) {
+      const result = await executeIptablesCommand(command);
+      results.push({
+        command: command,
+        success: result.success,
+        error: result.error
+      });
+      if (result.success) executed++;
+      logDebug(`[firewall] ${result.success ? '✓' : '✗'} ${command}`);
+    }
+    
     const allSuccess = results.every(r => r.success);
+    const successCount = results.filter(r => r.success).length;
     
     res.status(allSuccess ? 200 : 207).json({
       success: allSuccess,
-      message: allSuccess 
-        ? 'Les règles de firewall ont été appliquées avec succès'
-        : 'Certaines étapes ont échoué',
-      timestamp: new Date().toISOString(),
-      rulesFile: RULES_FILE,
-      results: results
+      message: `${successCount} commande(s) exécutée(s) avec succès`,
+      results: results,
+      executed: executed
     });
   } catch (error) {
     res.status(500).json({
